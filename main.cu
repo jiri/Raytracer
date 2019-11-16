@@ -119,7 +119,7 @@ struct Sphere {
 // small enough to be in constant GPU memory
 // { float radius, { float3 position }, { float3 emission }, { float3 colour }, refl_type }
 
-__constant__
+// __constant__
 Sphere spheres[] {
     Sphere { 1e5f, { 1e5f + 1.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { 0.75f, 0.25f, 0.25f }, DIFF }, //Left
     Sphere { 1e5f, { -1e5f + 99.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .25f, .25f, .75f }, DIFF }, //Rght
@@ -133,11 +133,15 @@ Sphere spheres[] {
 };
 
 __device__
-inline Intersection intersect_scene(const Ray& r) {
+inline Intersection intersect_scene(const Ray& r, Sphere* device_spheres) {
     Intersection ret {};
     ret.distance = 1e20;
 
-    for (Sphere& sphere : spheres) {
+    // printf("%f", device_spheres[0].rad);
+
+    for (int i = 0; i < 9; i++) {
+        const Sphere& sphere = device_spheres[i];
+
         Intersection intersection = sphere.intersect(r);
         if (intersection.valid && intersection.distance < ret.distance) {
             ret = intersection;
@@ -171,14 +175,14 @@ __device__ static float getrandom(unsigned int *seed0, unsigned int *seed1) {
 // outgoing radiance (at a point) = emitted radiance + reflected radiance
 // reflected radiance is sum (integral) of incoming radiance from all directions in hemisphere above point,
 // multiplied by reflectance function of material (BRDF) and cosine incident angle
-__device__ float3 radiance(Ray &r, unsigned int *s1, unsigned int *s2){ // returns ray color
+__device__ float3 radiance(Ray &r, unsigned int *s1, unsigned int *s2, Sphere* device_spheres){ // returns ray color
     float3 accucolor = make_float3(0.0f, 0.0f, 0.0f); // accumulates ray colour with each iteration through bounce loop
     float3 mask = make_float3(1.0f, 1.0f, 1.0f);
 
     // ray bounce loop (no Russian Roulette used)
     for (int bounces = 0; bounces < 4; bounces++){  // iteration up to 4 bounces (replaces recursion in CPU code)
         // test ray for intersection with scene
-        Intersection intersection = intersect_scene(r);
+        Intersection intersection = intersect_scene(r, device_spheres);
         if (!intersection.valid) {
             return make_float3(0.0f, 0.0f, 0.0f); // if miss, return black
         }
@@ -294,7 +298,7 @@ __device__ float3 radiance(Ray &r, unsigned int *s1, unsigned int *s2){ // retur
 // this kernel runs in parallel on all the CUDA threads
 
 __global__
-void render_kernel(float3* output){
+void render_kernel(float3* output, Sphere* device_spheres){
 
     // assign a CUDA thread to every pixel (x,y)
     // blockIdx, blockDim and threadIdx are CUDA specific keywords
@@ -323,7 +327,7 @@ void render_kernel(float3* output){
 
         // create primary ray, add incoming radiance to pixelcolor
         Ray ray(cam.orig + d * 40, normalize(d));
-        r = r + radiance(ray, &s1, &s2)*(1. / samps);
+        r = r + radiance(ray, &s1, &s2, device_spheres)*(1. / samps);
     }       // Camera rays are pushed ^^^^^ forward to start in interior
 
     // write rgb value of pixel to image buffer on the GPU, clamp value to [0.0f, 1.0f] range
@@ -341,6 +345,12 @@ int main(){
     // allocate memory on the CUDA device (GPU VRAM)
     cudaMalloc(&output_d, width * height * sizeof(float3));
 
+    Sphere* device_spheres;
+    cudaError_t err = cudaMalloc(&device_spheres, sizeof(spheres));
+    printf("%d", err);
+    err = cudaMemcpy(device_spheres, spheres, sizeof(spheres), cudaMemcpyHostToDevice);
+    printf("%d", err);
+
     // dim3 is CUDA specific type, block and grid are required to schedule CUDA threads over streaming multiprocessors
     dim3 block(8, 8, 1);
     dim3 grid(width / block.x, height / block.y, 1);
@@ -348,13 +358,14 @@ int main(){
     printf("CUDA initialised.\nStart rendering...\n");
 
     // schedule threads on device and launch CUDA kernel from host
-    render_kernel <<< grid, block >>>(output_d);
+    render_kernel <<< grid, block >>>(output_d, device_spheres);
 
     // copy results of computation from device back to host
     cudaMemcpy(output_h, output_d, width * height *sizeof(float3), cudaMemcpyDeviceToHost);
 
     // free CUDA memory
     cudaFree(output_d);
+    cudaFree(device_spheres);
 
     printf("Done!\n");
 
