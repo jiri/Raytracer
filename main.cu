@@ -6,9 +6,11 @@
 
 #include "cutil_math.h"
 
-#define width 800  // screenwidth
-#define height 600 // screenheight
-#define samps 2048 // samples
+#include "OpenImageDenoise/oidn.hpp"
+
+#define width 1920  // screenwidth
+#define height 2160 // screenheight
+#define samps 32 // samples
 
 struct Ray {
     float3 orig; // ray origin
@@ -180,7 +182,7 @@ __device__ float3 radiance(Ray &r, unsigned int *s1, unsigned int *s2, Sphere* d
     float3 mask = make_float3(1.0f, 1.0f, 1.0f);
 
     // ray bounce loop (no Russian Roulette used)
-    for (int bounces = 0; bounces < 4; bounces++){  // iteration up to 4 bounces (replaces recursion in CPU code)
+    for (int bounces = 0; bounces < 12; bounces++){  // iteration up to 4 bounces (replaces recursion in CPU code)
         // test ray for intersection with scene
         Intersection intersection = intersect_scene(r, device_spheres);
         if (!intersection.valid) {
@@ -298,7 +300,7 @@ __device__ float3 radiance(Ray &r, unsigned int *s1, unsigned int *s2, Sphere* d
 // this kernel runs in parallel on all the CUDA threads
 
 __global__
-void render_kernel(float3* output, Sphere* device_spheres){
+void render_kernel(float3* output, float3* normal, float3* albedo, Sphere* device_spheres){
 
     // assign a CUDA thread to every pixel (x,y)
     // blockIdx, blockDim and threadIdx are CUDA specific keywords
@@ -317,6 +319,8 @@ void render_kernel(float3* output, Sphere* device_spheres){
     float3 cx = make_float3(width * .5135 / height, 0.0f, 0.0f); // ray direction offset in x direction
     float3 cy = normalize(cross(cx, cam.dir)) * .5135; // ray direction offset in y direction (.5135 is field of view angle)
     float3 r; // r is final pixel color
+    float3 n;
+    float3 a;
 
     r = make_float3(0.0f); // reset r to zero for every pixel
 
@@ -328,10 +332,14 @@ void render_kernel(float3* output, Sphere* device_spheres){
         // create primary ray, add incoming radiance to pixelcolor
         Ray ray(cam.orig + d * 40, normalize(d));
         r = r + radiance(ray, &s1, &s2, device_spheres)*(1. / samps);
+        // n = f_normal(ray, &s1, &s2, device_spheres);
+        // a = f_albedo(ray, device_spheres);
     }       // Camera rays are pushed ^^^^^ forward to start in interior
 
     // write rgb value of pixel to image buffer on the GPU, clamp value to [0.0f, 1.0f] range
     output[i] = make_float3(clamp(r.x, 0.0f, 1.0f), clamp(r.y, 0.0f, 1.0f), clamp(r.z, 0.0f, 1.0f));
+    normal[i] = n;
+    albedo[i] = a;
 }
 
 inline float clamp(float x){ return x < 0.0f ? 0.0f : x > 1.0f ? 1.0f : x; }
@@ -342,8 +350,16 @@ int main(){
     float3* output_h = new float3[width*height]; // pointer to memory for image on the host (system RAM)
     float3* output_d;    // pointer to memory for image on the device (GPU VRAM)
 
+    float3* normal_h = new float3[width*height];
+    float3* normal_d;
+
+    float3* albedo_h = new float3[width*height];
+    float3* albedo_d;
+
     // allocate memory on the CUDA device (GPU VRAM)
     cudaMalloc(&output_d, width * height * sizeof(float3));
+    cudaMalloc(&normal_d, width * height * sizeof(float3));
+    cudaMalloc(&albedo_d, width * height * sizeof(float3));
 
     Sphere* device_spheres;
     cudaError_t err = cudaMalloc(&device_spheres, sizeof(spheres));
@@ -358,26 +374,48 @@ int main(){
     printf("CUDA initialised.\nStart rendering...\n");
 
     // schedule threads on device and launch CUDA kernel from host
-    render_kernel <<< grid, block >>>(output_d, device_spheres);
+    render_kernel <<< grid, block >>>(output_d, normal_d, albedo_d, device_spheres);
 
     // copy results of computation from device back to host
     cudaMemcpy(output_h, output_d, width * height *sizeof(float3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(normal_h, normal_d, width * height *sizeof(float3), cudaMemcpyDeviceToHost);
+    cudaMemcpy(albedo_h, albedo_d, width * height *sizeof(float3), cudaMemcpyDeviceToHost);
 
     // free CUDA memory
     cudaFree(output_d);
+    cudaFree(normal_d);
+    cudaFree(albedo_d);
     cudaFree(device_spheres);
+
+    printf("Denoising...\n");
+
+    float3* denoised = new float3[width*height];
+
+    oidn::DeviceRef device = oidn::newDevice();
+    device.commit();
+
+    oidn::FilterRef filter = device.newFilter("RT");
+    filter.setImage("color",  output_h,  oidn::Format::Float3, width, height);
+    // filter.setImage("albedo", albedo_h, oidn::Format::Float3, width, height);
+    // filter.setImage("normal", normal_h, oidn::Format::Float3, width, height);
+    filter.setImage("output", denoised, oidn::Format::Float3, width, height);
+    filter.commit();
+
+    filter.execute();
 
     printf("Done!\n");
 
-    // Write image to PPM file, a very simple image file format
     FILE *f = fopen("smallptcuda.ppm", "w");
     fprintf(f, "P3\n%d %d\n%d\n", width, height, 255);
     for (int i = 0; i < width*height; i++)  // loop over pixels, write RGB values
-        fprintf(f, "%d %d %d ", toInt(output_h[i].x),
-                toInt(output_h[i].y),
-                toInt(output_h[i].z));
+        fprintf(f, "%d %d %d ",
+                toInt(denoised[i].x),
+                toInt(denoised[i].y),
+                toInt(denoised[i].z));
 
     printf("Saved image to 'smallptcuda.ppm'\n");
 
     delete[] output_h;
+    delete[] normal_h;
+    delete[] albedo_h;
 }
