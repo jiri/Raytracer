@@ -10,7 +10,7 @@
 
 #define width 1920  // screenwidth
 #define height 2160 // screenheight
-#define samps 32 // samples
+#define samps 128 // samples
 
 struct Ray {
     float3 orig; // ray origin
@@ -131,7 +131,8 @@ Sphere spheres[] {
     Sphere { 1e5f, { 50.0f, -1e5f + 81.6f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Top
     Sphere { 16.5f, { 27.0f, 16.5f, 47.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, SPEC }, // small sphere 1
     Sphere { 16.5f, { 73.0f, 16.5f, 78.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, REFR }, // small sphere 2
-    Sphere { 600.0f, { 50.0f, 681.6f - .77f, 81.6f }, { 2.0f, 1.8f, 1.6f }, { 0.0f, 0.0f, 0.0f }, DIFF }  // Light
+    Sphere { 8.0f, { 50.0f, 50.0f, 50.0f }, { 13.0f, 11.5f, 11.0f }, { 1.0f, 1.0f, 1.0f }, DIFF },
+//    Sphere { 600.0f, { 50.0f, 681.6f - .77f, 81.6f }, { 2.0f, 1.8f, 1.6f }, { 0.0f, 0.0f, 0.0f }, DIFF }  // Light
 };
 
 __device__
@@ -362,10 +363,8 @@ int main(){
     cudaMalloc(&albedo_d, width * height * sizeof(float3));
 
     Sphere* device_spheres;
-    cudaError_t err = cudaMalloc(&device_spheres, sizeof(spheres));
-    printf("%d", err);
-    err = cudaMemcpy(device_spheres, spheres, sizeof(spheres), cudaMemcpyHostToDevice);
-    printf("%d", err);
+    cudaMalloc(&device_spheres, sizeof(spheres));
+    cudaMemcpy(device_spheres, spheres, sizeof(spheres), cudaMemcpyHostToDevice);
 
     // dim3 is CUDA specific type, block and grid are required to schedule CUDA threads over streaming multiprocessors
     dim3 block(8, 8, 1);
