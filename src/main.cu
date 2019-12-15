@@ -9,7 +9,7 @@
 
 #define width 512
 #define height 512
-#define samples 128
+#define samples 4096
 
 struct Ray {
     float3 origin;
@@ -123,7 +123,7 @@ inline Intersection intersect_scene(const Ray& r, Sphere* device_spheres) {
 
 // On-device RNG from https://github.com/gz/rust-raytracer
 
-__device__
+__device__ __host__
 static float getrandom(uint64_t* seed0, uint64_t* seed1) {
     *seed0 = 36969 * ((*seed0) & 65535) + ((*seed0) >> 16);
     *seed1 = 18000 * ((*seed1) & 65535) + ((*seed1) >> 16);
@@ -248,11 +248,19 @@ void render_kernel(float3* output, Sphere* device_spheres) {
     float3 cy = normalize(cross(cx, cam.direction)) * .5135;
     float3 r = make_float3(0.0f);
 
-    for (int s = 0; s < samples; s++) {
-        float3 d = cam.direction + cx * ((.25 + x) / width - .5) + cy * ((.25 + y) / height - .5);
+    float alias_radius = 2.0f;
 
-        Ray ray(cam.origin + d * 40, normalize(d));
-        r += radiance(ray, &s1, &s2, device_spheres);
+    for (int s = 0; s < samples; s++) {
+        float bias_x = getrandom(&s1, &s2) - 0.5f;
+        float bias_y = getrandom(&s1, &s2) - 0.5f;
+
+        float3 d = normalize(
+                cam.direction + cx * ((0.25f + x + bias_x * alias_radius) / width  - 0.5f)
+                              + cy * ((0.25f + y + bias_y * alias_radius) / height - 0.5f)
+        );
+
+        Ray ray(cam.origin + normalize(d) * 40.0f, normalize(d));
+        r += radiance(ray, &s1, &s2, shared_spheres);
     }
 
     r /= samples;
