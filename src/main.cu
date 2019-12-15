@@ -1,5 +1,7 @@
-#include <stdio.h>
-#include <stdint.h>
+#include <cstdio>
+#include <cstdint>
+#include <random>
+#include <vector>
 
 #include <cuda_runtime.h>
 #include <vector_types.h>
@@ -9,7 +11,12 @@
 
 #define width 512
 #define height 512
-#define samples 4096
+
+#ifdef USE_CPU
+#define samples 128
+#else
+#define samples 8192
+#endif
 
 struct Ray {
     float3 origin;
@@ -52,7 +59,7 @@ struct Sphere {
     float3 colour;
     Material_t material;
 
-    __device__
+    __host__ __device__
     Intersection intersect(const Ray& r) const {
         Intersection intersection {};
 
@@ -91,25 +98,12 @@ struct Sphere {
     }
 };
 
-Sphere spheres[] {
-    Sphere { 1e5f, { 1e5f + 1.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { 0.75f, 0.25f, 0.25f }, DIFF }, //Left
-    Sphere { 1e5f, { -1e5f + 99.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .25f, .25f, .75f }, DIFF }, //Rght
-    Sphere { 1e5f, { 50.0f, 40.8f, 1e5f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Back
-    Sphere { 1e5f, { 50.0f, 40.8f, -1e5f + 600.0f }, { 0.0f, 0.0f, 0.0f }, { 1.00f, 1.00f, 1.00f }, DIFF }, //Frnt
-    Sphere { 1e5f, { 50.0f, 1e5f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Botm
-    Sphere { 1e5f, { 50.0f, -1e5f + 81.6f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Top
-    Sphere { 16.5f, { 27.0f, 16.5f, 47.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, SPEC }, // small sphere 1
-    Sphere { 16.5f, { 73.0f, 16.5f, 78.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, REFR }, // small sphere 2
-    Sphere { 8.0f, { 50.0f, 50.0f, 50.0f }, { 13.0f, 11.5f, 11.0f }, { 1.0f, 1.0f, 1.0f }, DIFF },
-//    Sphere { 600.0f, { 50.0f, 681.6f - .77f, 81.6f }, { 2.0f, 1.8f, 1.6f }, { 0.0f, 0.0f, 0.0f }, DIFF }  // Light
-};
-
-__device__
-inline Intersection intersect_scene(const Ray& r, Sphere* device_spheres) {
+__host__ __device__
+inline Intersection intersect_scene(const Ray& r, Sphere* device_spheres, size_t sphere_count) {
     Intersection ret {};
     ret.distance = 1e20;
 
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < sphere_count; i++) {
         const Sphere& sphere = device_spheres[i];
 
         Intersection intersection = sphere.intersect(r);
@@ -123,7 +117,7 @@ inline Intersection intersect_scene(const Ray& r, Sphere* device_spheres) {
 
 // On-device RNG from https://github.com/gz/rust-raytracer
 
-__device__ __host__
+__host__ __device__
 static float getrandom(uint64_t* seed0, uint64_t* seed1) {
     *seed0 = 36969 * ((*seed0) & 65535) + ((*seed0) >> 16);
     *seed1 = 18000 * ((*seed1) & 65535) + ((*seed1) >> 16);
@@ -140,13 +134,13 @@ static float getrandom(uint64_t* seed0, uint64_t* seed1) {
     return (res.f - 2.0f) / 2.0f;
 }
 
-__device__
-float3 radiance(Ray& r, uint64_t* s1, uint64_t* s2, Sphere* device_spheres) {
+__host__ __device__
+float3 radiance(Ray& r, uint64_t* s1, uint64_t* s2, Sphere* device_spheres, size_t sphere_count) {
     float3 color_acc = make_float3(0.0f, 0.0f, 0.0f);
     float3 mask = make_float3(1.0f, 1.0f, 1.0f);
 
     for (int bounces = 0; bounces < 12; bounces++) {
-        Intersection intersection = intersect_scene(r, device_spheres);
+        Intersection intersection = intersect_scene(r, device_spheres, sphere_count);
         if (!intersection.valid) {
             return make_float3(0.0f, 0.0f, 0.0f);
         }
@@ -225,18 +219,8 @@ float3 radiance(Ray& r, uint64_t* s1, uint64_t* s2, Sphere* device_spheres) {
     return color_acc;
 }
 
-__global__
-void render_kernel(float3* output, Sphere* device_spheres) {
-    __shared__ Sphere shared_spheres[9];
-
-    if (threadIdx.x < 9) {
-        shared_spheres[threadIdx.x] = device_spheres[threadIdx.x];
-    }
-    __syncthreads();
-
-    uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
-
+__host__ __device__
+void render_equation(uint32_t x, uint32_t y, float3* output, Sphere* spheres, size_t sphere_count) {
     uint64_t i = (height - y - 1) * width + x;
 
     uint64_t s1 = x;
@@ -260,12 +244,38 @@ void render_kernel(float3* output, Sphere* device_spheres) {
         );
 
         Ray ray(cam.origin + normalize(d) * 40.0f, normalize(d));
-        r += radiance(ray, &s1, &s2, shared_spheres);
+        r += radiance(ray, &s1, &s2, spheres, sphere_count);
     }
 
     r /= samples;
 
     output[i] = clamp(r, 0.0f, 1.0f);
+}
+
+__global__
+void render_kernel(float3* output, Sphere* device_spheres, size_t sphere_count) {
+    __shared__ Sphere shared_spheres[128];
+
+    if (threadIdx.x < sphere_count) {
+        shared_spheres[threadIdx.x] = device_spheres[threadIdx.x];
+    }
+    __syncthreads();
+
+    uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    render_equation(x, y, output, shared_spheres, sphere_count);
+}
+
+void render_host(float3* output, Sphere* spheres, size_t sphere_count) {
+    for (uint32_t x = 0; x < width; x++) {
+        for (uint32_t y = 0; y < height; y++) {
+            printf("\r-- Rendering pixel (%d, %d)", x, y);
+
+            render_equation(x, y, output, spheres, sphere_count);
+        }
+    }
+    printf("\r-- Finished\n");
 }
 
 // Float to byte with gamma correction
@@ -285,22 +295,50 @@ void write_to_file(const char* filename, float3* buffer) {
     printf("Saved image to '%s'\n", filename);
 }
 
+std::vector<Sphere> spheres {
+        Sphere { 1e5f, { 1e5f + 1.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { 0.75f, 0.25f, 0.25f }, DIFF }, //Left
+        Sphere { 1e5f, { -1e5f + 99.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .25f, .25f, .75f }, DIFF }, //Rght
+        Sphere { 1e5f, { 50.0f, 40.8f, 1e5f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Back
+        Sphere { 1e5f, { 50.0f, 40.8f, -1e5f + 600.0f }, { 0.0f, 0.0f, 0.0f }, { 1.00f, 1.00f, 1.00f }, DIFF }, //Frnt
+        Sphere { 1e5f, { 50.0f, 1e5f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Botm
+        Sphere { 1e5f, { 50.0f, -1e5f + 81.6f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Top
+        Sphere { 16.5f, { 27.0f, 16.5f, 47.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, SPEC }, // small sphere 1
+        Sphere { 16.5f, { 73.0f, 16.5f, 78.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, REFR }, // small sphere 2
+        Sphere { 8.0f, { 50.0f, 50.0f, 50.0f }, { 13.0f, 11.5f, 11.0f }, { 1.0f, 1.0f, 1.0f }, DIFF },
+//    Sphere { 600.0f, { 50.0f, 681.6f - .77f, 81.6f }, { 2.0f, 1.8f, 1.6f }, { 0.0f, 0.0f, 0.0f }, DIFF }  // Light
+};
+
 int main() {
+    std::random_device rd;
+    std::default_random_engine gen(rd());
+
+    std::uniform_real_distribution<float> dist(-20.0f, 20.0f);
+    for (int i = 0; i < 32; i++) {
+        float3 center = make_float3(45.0f, 24.0f, 65.0f);
+        Sphere s { 4.0f, center + make_float3(dist(gen), dist(gen), dist(gen)), { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, DIFF };
+        spheres.push_back(s);
+    }
+
     float3* output_h = new float3[width * height];
     float3* output_d;
 
     cudaMalloc(&output_d, width * height * sizeof(float3));
 
     Sphere* device_spheres;
-    cudaMalloc(&device_spheres, sizeof(spheres));
-    cudaMemcpy(device_spheres, spheres, sizeof(spheres), cudaMemcpyHostToDevice);
+    cudaMalloc(&device_spheres, spheres.size() * sizeof(Sphere));
+    cudaMemcpy(device_spheres, spheres.data(), spheres.size() * sizeof(Sphere), cudaMemcpyHostToDevice);
 
     dim3 block(32, 32, 1);
     dim3 grid(width / block.x, height / block.y, 1);
 
     printf("Rendering...\n");
 
-    render_kernel<<<grid, block>>>(output_d, device_spheres);
+#ifdef USE_CPU
+    render_host(output_h, spheres.data(), spheres.size());
+#else
+    // , spheres.size() * sizeof(Sphere)
+    render_kernel<<<grid, block>>>(output_d, device_spheres, spheres.size());
+#endif
 
     cudaMemcpy(output_h, output_d, width * height * sizeof(float3), cudaMemcpyDeviceToHost);
 
