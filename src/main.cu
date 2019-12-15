@@ -227,6 +227,13 @@ float3 radiance(Ray& r, uint64_t* s1, uint64_t* s2, Sphere* device_spheres) {
 
 __global__
 void render_kernel(float3* output, Sphere* device_spheres) {
+    __shared__ Sphere shared_spheres[9];
+
+    if (threadIdx.x < 9) {
+        shared_spheres[threadIdx.x] = device_spheres[threadIdx.x];
+    }
+    __syncthreads();
+
     uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
