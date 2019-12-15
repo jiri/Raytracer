@@ -279,6 +279,7 @@ int main(){
 
     printf("Denoising...\n");
 
+#ifdef USE_OIDN
     float3* denoised = new float3[width*height];
 
     oidn::DeviceRef device = oidn::newDevice();
@@ -292,10 +293,13 @@ int main(){
     filter.execute();
 
     printf("Done!\n");
+#else
+    float3* denoised = output_h;
+#endif
 
     FILE *f = fopen("smallptcuda.ppm", "w");
     fprintf(f, "P3\n%d %d\n%d\n", width, height, 255);
-    for (int i = 0; i < width*height; i++)  // loop over pixels, write RGB values
+    for (int i = 0; i < width * height; i++)  // loop over pixels, write RGB values
         fprintf(f, "%d %d %d ",
                 toInt(denoised[i].x),
                 toInt(denoised[i].y),
