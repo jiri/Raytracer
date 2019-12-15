@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 
 #include <cuda_runtime.h>
 #include <vector_types.h>
@@ -6,29 +7,27 @@
 
 #include "cutil_math.h"
 
-#include "OpenImageDenoise/oidn.hpp"
-
-#define width 1920  // screenwidth
-#define height 2160 // screenheight
-#define samps 128 // samples
+#define width 512
+#define height 512
+#define samples 128
 
 struct Ray {
-    float3 orig; // ray origin
-    float3 dir;  // ray direction
-
-    float3& origin;
-    float3& direction;
+    float3 origin;
+    float3 direction;
 
     __host__ __device__
     Ray(float3 o_, float3 d_)
-        : orig(o_)
-        , dir(d_)
-        , origin { this->orig }
-        , direction { this->dir }
+        : origin { o_ }
+        , direction { d_ }
     { }
+
+    __host__ __device__
+    float3 at(float distance) const {
+        return this->origin + this->direction * distance;
+    }
 };
 
-enum Refl_t {
+enum Material_t {
     DIFF,
     SPEC,
     REFR,
@@ -47,11 +46,11 @@ struct Intersection {
 };
 
 struct Sphere {
-    float rad;
-    float3 pos;
-    float3 emi;
-    float3 col;
-    Refl_t refl;
+    float radius;
+    float3 position;
+    float3 emission;
+    float3 colour;
+    Material_t material;
 
     __device__
     Intersection intersect(const Ray& r) const {
@@ -59,11 +58,11 @@ struct Sphere {
 
         intersection.object = this;
 
-        float3 op = pos - r.orig;
+        float3 op = this->position - r.origin;
         float epsilon = 0.001f;
-        float b = dot(op, r.dir);
+        float b = dot(op, r.direction);
 
-        float disc = b * b - dot(op, op) + rad * rad;
+        float disc = b * b - dot(op, op) + this->radius * this->radius;
         if (disc < 0) {
             return intersection;
         }
@@ -84,8 +83,8 @@ struct Sphere {
         }
 
         if (intersection.valid) {
-            intersection.point = r.orig + r.dir * intersection.distance;
-            intersection.normal = normalize(intersection.point - this->pos);
+            intersection.point = r.at(intersection.distance);
+            intersection.normal = normalize(intersection.point - this->position);
         }
 
         return intersection;
@@ -125,7 +124,7 @@ inline Intersection intersect_scene(const Ray& r, Sphere* device_spheres) {
 // On-device RNG from https://github.com/gz/rust-raytracer
 
 __device__
-static float getrandom(unsigned int* seed0, unsigned int* seed1) {
+static float getrandom(uint64_t* seed0, uint64_t* seed1) {
     *seed0 = 36969 * ((*seed0) & 65535) + ((*seed0) >> 16);
     *seed1 = 18000 * ((*seed1) & 65535) + ((*seed1) >> 16);
 
@@ -142,7 +141,7 @@ static float getrandom(unsigned int* seed0, unsigned int* seed1) {
 }
 
 __device__
-float3 radiance(Ray& r, unsigned int* s1, unsigned int* s2, Sphere* device_spheres) {
+float3 radiance(Ray& r, uint64_t* s1, uint64_t* s2, Sphere* device_spheres) {
     float3 color_acc = make_float3(0.0f, 0.0f, 0.0f);
     float3 mask = make_float3(1.0f, 1.0f, 1.0f);
 
@@ -157,68 +156,70 @@ float3 radiance(Ray& r, unsigned int* s1, unsigned int* s2, Sphere* device_spher
         float3 x = intersection.point;
         float3 n = intersection.normal;
 
-        float3 nl = dot(n, r.dir) < 0 ? n : n * -1;
-        float3 f = obj.col;
+        float3 nl = dot(n, r.direction) < 0 ? n : n * -1;
+        float3 f = obj.colour;
 
-        color_acc += mask * obj.emi;
+        color_acc += mask * obj.emission;
         float3 d;
 
-        if (obj.refl == DIFF) {
+        if (obj.material == DIFF) {
             float r1 = 2 * M_PI * getrandom(s1, s2);
             float r2 = getrandom(s1, s2);
             float r2s = sqrtf(r2);
 
             float3 w = nl;
-            float3 u = normalize(cross((fabs(w.x) > 0.1f ? make_float3(0, 1, 0) : make_float3(1, 0, 0)), w));
+            float3 u = normalize(cross(fabs(w.x) > 0.1f ? make_float3(0.0f, 1.0f, 0.0f) : make_float3(1.0f, 0.0f, 0.0f), w));
             float3 v = cross(w, u);
 
             d = normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrtf(1 - r2));
             x += nl * 0.03f;
             mask *= f;
         }
-        else if (obj.refl == SPEC) {
-            d = r.dir - 2.0f * n * dot(n, r.dir);
+        else if (obj.material == SPEC) {
+            d = r.direction - 2.0f * n * dot(n, r.direction);
             x += nl * 0.01f;
             mask *= f;
         }
-        else if (obj.refl == REFR) {
+        else if (obj.material == REFR) {
             bool into = dot(n, nl) > 0;
             float nc = 1.0f;
             float nt = 1.5f;
             float nnt = into ? nc / nt : nt / nc;
-            float ddn = dot(r.dir, nl);
-            float cos2t = 1.0f - nnt * nnt * (1.f - ddn * ddn);
+            float ddn = dot(r.direction, nl);
+            float cos2t = 1.0f - nnt * nnt * (1.0f - ddn * ddn);
 
             if (cos2t < 0.0f) {
-                d = reflect(r.dir, n);
+                d = reflect(r.direction, n);
                 x += nl * 0.01f;
             }
             else {
-                float3 tdir = normalize(r.dir * nnt - n * ((into ? 1 : -1) * (ddn * nnt + sqrtf(cos2t))));
+                float3 tdir = normalize(r.direction * nnt - n * ((into ? 1 : -1) * (ddn * nnt + sqrtf(cos2t))));
 
                 float R0 = (nt - nc) * (nt - nc) / (nt + nc) * (nt + nc);
-                float c = 1.f - (into ? -ddn : dot(tdir, n));
-                float Re = R0 + (1.f - R0) * c * c * c * c * c;
-                float Tr = 1 - Re;
-                float P = .25f + .5f * Re;
+                float c = 1.0f - (into ? -ddn : dot(tdir, n));
+                float Re = R0 + (1.0f - R0) * c * c * c * c * c;
+                float Tr = 1.0f - Re;
+                float P = 0.25f + 0.5f * Re;
                 float RP = Re / P;
-                float TP = Tr / (1.f - P);
+                float TP = Tr / (1.0f - P);
 
-                if (getrandom(s1, s2) < 0.25) {
+                if (getrandom(s1, s2) < 0.25f) {
                     mask *= RP;
-                    d = reflect(r.dir, n);
+                    d = reflect(r.direction, n);
+                    // Reflection bias
                     x += nl * 0.02f;
                 }
                 else {
                     mask *= TP;
                     d = tdir;
+                    // Transmission bias
                     x += nl * 0.000001f;
                 }
             }
         }
 
-        r.orig = x;
-        r.dir = d;
+        r.origin = x;
+        r.direction = d;
     }
 
     return color_acc;
@@ -226,36 +227,50 @@ float3 radiance(Ray& r, unsigned int* s1, unsigned int* s2, Sphere* device_spher
 
 __global__
 void render_kernel(float3* output, Sphere* device_spheres) {
-    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    unsigned int i = (height - y - 1) * width + x;
+    uint64_t i = (height - y - 1) * width + x;
 
-    unsigned int s1 = x;
-    unsigned int s2 = y;
+    uint64_t s1 = x;
+    uint64_t s2 = y;
 
     Ray cam(make_float3(50, 52, 295.6), normalize(make_float3(0, -0.042612, -1)));
 
     float3 cx = make_float3(width * .5135 / height, 0.0f, 0.0f);
-    float3 cy = normalize(cross(cx, cam.dir)) * .5135;
+    float3 cy = normalize(cross(cx, cam.direction)) * .5135;
     float3 r = make_float3(0.0f);
 
+    for (int s = 0; s < samples; s++) {
+        float3 d = cam.direction + cx * ((.25 + x) / width - .5) + cy * ((.25 + y) / height - .5);
 
-    for (int s = 0; s < samps; s++) {
-        float3 d = cam.dir + cx * ((.25 + x) / width - .5) + cy * ((.25 + y) / height - .5);
-
-        Ray ray(cam.orig + d * 40, normalize(d));
-        r = r + radiance(ray, &s1, &s2, device_spheres)*(1. / samps);
+        Ray ray(cam.origin + d * 40, normalize(d));
+        r += radiance(ray, &s1, &s2, device_spheres);
     }
 
-    output[i] = make_float3(clamp(r.x, 0.0f, 1.0f), clamp(r.y, 0.0f, 1.0f), clamp(r.z, 0.0f, 1.0f));
+    r /= samples;
+
+    output[i] = clamp(r, 0.0f, 1.0f);
 }
 
-inline float clamp(float x){ return x < 0.0f ? 0.0f : x > 1.0f ? 1.0f : x; }
+// Float to byte with gamma correction
+int toInt(float n) {
+    return (int)(pow(clamp(n, 0.0f, 1.0f), 1 / 2.2) * 255.0f + 0.5f);
+}
 
-inline int toInt(float x){ return int(pow(clamp(x), 1 / 2.2) * 255 + .5); }
+void write_to_file(const char* filename, float3* buffer) {
+    FILE *f = fopen(filename, "w");
+    fprintf(f, "P3\n%d %d\n%d\n", width, height, 255);
+    for (int i = 0; i < width * height; i++)  // loop over pixels, write RGB values
+        fprintf(f, "%d %d %d ",
+                toInt(buffer[i].x),
+                toInt(buffer[i].y),
+                toInt(buffer[i].z));
+    fclose(f);
+    printf("Saved image to '%s'\n", filename);
+}
 
-int main(){
+int main() {
     float3* output_h = new float3[width * height];
     float3* output_d;
 
@@ -265,7 +280,7 @@ int main(){
     cudaMalloc(&device_spheres, sizeof(spheres));
     cudaMemcpy(device_spheres, spheres, sizeof(spheres), cudaMemcpyHostToDevice);
 
-    dim3 block(8, 8, 1);
+    dim3 block(32, 32, 1);
     dim3 grid(width / block.x, height / block.y, 1);
 
     printf("Rendering...\n");
@@ -277,35 +292,7 @@ int main(){
     cudaFree(output_d);
     cudaFree(device_spheres);
 
-    printf("Denoising...\n");
-
-#ifdef USE_OIDN
-    float3* denoised = new float3[width*height];
-
-    oidn::DeviceRef device = oidn::newDevice();
-    device.commit();
-
-    oidn::FilterRef filter = device.newFilter("RT");
-    filter.setImage("color",  output_h,  oidn::Format::Float3, width, height);
-    filter.setImage("output", denoised, oidn::Format::Float3, width, height);
-    filter.commit();
-
-    filter.execute();
-
-    printf("Done!\n");
-#else
-    float3* denoised = output_h;
-#endif
-
-    FILE *f = fopen("smallptcuda.ppm", "w");
-    fprintf(f, "P3\n%d %d\n%d\n", width, height, 255);
-    for (int i = 0; i < width * height; i++)  // loop over pixels, write RGB values
-        fprintf(f, "%d %d %d ",
-                toInt(denoised[i].x),
-                toInt(denoised[i].y),
-                toInt(denoised[i].z));
-
-    printf("Saved image to 'smallptcuda.ppm'\n");
+    write_to_file("smallptcuda.ppm", output_h);
 
     delete[] output_h;
 }
