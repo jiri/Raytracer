@@ -8,15 +8,11 @@
 #include <device_launch_parameters.h>
 
 #include "cutil_math.h"
+#include "cxxopts.hpp"
 
-#define width 512
-#define height 512
-
-#ifdef USE_CPU
-#define samples 128
-#else
-#define samples 8192
-#endif
+static uint32_t width = 512;
+static uint32_t height = 512;
+static uint32_t samples = 128;
 
 struct Ray {
     float3 origin;
@@ -220,7 +216,7 @@ float3 radiance(Ray& r, uint64_t* s1, uint64_t* s2, Sphere* device_spheres, size
 }
 
 __host__ __device__
-void render_equation(uint32_t x, uint32_t y, float3* output, Sphere* spheres, size_t sphere_count) {
+void render_equation(uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t samples, float3* output, Sphere* spheres, size_t sphere_count) {
     uint64_t i = (height - y - 1) * width + x;
 
     uint64_t s1 = x;
@@ -253,7 +249,7 @@ void render_equation(uint32_t x, uint32_t y, float3* output, Sphere* spheres, si
 }
 
 __global__
-void render_kernel(float3* output, Sphere* device_spheres, size_t sphere_count) {
+void render_kernel(float3* output, uint32_t width, uint32_t height, uint32_t samples, Sphere* device_spheres, size_t sphere_count) {
     __shared__ Sphere shared_spheres[128];
 
     if (threadIdx.x < sphere_count) {
@@ -264,15 +260,16 @@ void render_kernel(float3* output, Sphere* device_spheres, size_t sphere_count) 
     uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    render_equation(x, y, output, shared_spheres, sphere_count);
+    render_equation(x, y, width, height, samples, output, shared_spheres, sphere_count);
 }
 
+__host__
 void render_host(float3* output, Sphere* spheres, size_t sphere_count) {
     for (uint32_t x = 0; x < width; x++) {
         for (uint32_t y = 0; y < height; y++) {
             printf("\r-- Rendering pixel (%d, %d)", x, y);
 
-            render_equation(x, y, output, spheres, sphere_count);
+            render_equation(x, y, width, height, samples, output, spheres, sphere_count);
         }
     }
     printf("\r-- Finished\n");
@@ -296,29 +293,49 @@ void write_to_file(const char* filename, float3* buffer) {
 }
 
 std::vector<Sphere> spheres {
-        Sphere { 1e5f, { 1e5f + 1.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { 0.75f, 0.25f, 0.25f }, DIFF }, //Left
-        Sphere { 1e5f, { -1e5f + 99.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .25f, .25f, .75f }, DIFF }, //Rght
-        Sphere { 1e5f, { 50.0f, 40.8f, 1e5f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Back
-        Sphere { 1e5f, { 50.0f, 40.8f, -1e5f + 600.0f }, { 0.0f, 0.0f, 0.0f }, { 1.00f, 1.00f, 1.00f }, DIFF }, //Frnt
-        Sphere { 1e5f, { 50.0f, 1e5f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Botm
-        Sphere { 1e5f, { 50.0f, -1e5f + 81.6f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF }, //Top
-        Sphere { 16.5f, { 27.0f, 16.5f, 47.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, SPEC }, // small sphere 1
-        Sphere { 16.5f, { 73.0f, 16.5f, 78.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, REFR }, // small sphere 2
+        Sphere { 1e5f, { 1e5f + 1.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { 0.75f, 0.25f, 0.25f }, DIFF },
+        Sphere { 1e5f, { -1e5f + 99.0f, 40.8f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .25f, .25f, .75f }, DIFF },
+        Sphere { 1e5f, { 50.0f, 40.8f, 1e5f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF },
+        Sphere { 1e5f, { 50.0f, 40.8f, -1e5f + 600.0f }, { 0.0f, 0.0f, 0.0f }, { 1.00f, 1.00f, 1.00f }, DIFF },
+        Sphere { 1e5f, { 50.0f, 1e5f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF },
+        Sphere { 1e5f, { 50.0f, -1e5f + 81.6f, 81.6f }, { 0.0f, 0.0f, 0.0f }, { .75f, .75f, .75f }, DIFF },
+
+        Sphere { 16.5f, { 27.0f, 16.5f, 47.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, SPEC },
+        Sphere { 16.5f, { 73.0f, 16.5f, 78.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, REFR },
         Sphere { 8.0f, { 50.0f, 50.0f, 50.0f }, { 13.0f, 11.5f, 11.0f }, { 1.0f, 1.0f, 1.0f }, DIFF },
-//    Sphere { 600.0f, { 50.0f, 681.6f - .77f, 81.6f }, { 2.0f, 1.8f, 1.6f }, { 0.0f, 0.0f, 0.0f }, DIFF }  // Light
+//    Sphere { 600.0f, { 50.0f, 681.6f - .77f, 81.6f }, { 2.0f, 1.8f, 1.6f }, { 0.0f, 0.0f, 0.0f }, DIFF }
 };
 
-int main() {
+int main(int argc, char** argv) {
+    /* Parse options */
+    cxxopts::Options options(argv[0], "Path tracer for MI-PRC");
+
+    options.add_options()
+            ("w,width", "Image width", cxxopts::value<uint32_t>()->default_value("512"))
+            ("h,height", "Image height", cxxopts::value<uint32_t>()->default_value("512"))
+            ("s,samples", "Samples per pixel", cxxopts::value<uint32_t>()->default_value("1024"))
+            ("r,random", "Random spheres", cxxopts::value<uint32_t>()->default_value("0"))
+            ("o,output", "Output file", cxxopts::value<std::string>())
+            ;
+
+    auto opts = options.parse(argc, argv);
+
+    width = opts["w"].as<uint32_t>();
+    height = opts["h"].as<uint32_t>();
+    samples = opts["s"].as<uint32_t>();
+
+    /* Add random spheres */
     std::random_device rd;
     std::default_random_engine gen(rd());
-
     std::uniform_real_distribution<float> dist(-20.0f, 20.0f);
-    for (int i = 0; i < 32; i++) {
+
+    for (int i = 0; i < opts["r"].as<uint32_t>(); i++) {
         float3 center = make_float3(45.0f, 24.0f, 65.0f);
         Sphere s { 4.0f, center + make_float3(dist(gen), dist(gen), dist(gen)), { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f }, DIFF };
         spheres.push_back(s);
     }
 
+    /* Allocate memory */
     float3* output_h = new float3[width * height];
     float3* output_d;
 
@@ -331,21 +348,25 @@ int main() {
     dim3 block(32, 32, 1);
     dim3 grid(width / block.x, height / block.y, 1);
 
+    /* Render */
     printf("Rendering...\n");
 
 #ifdef USE_CPU
     render_host(output_h, spheres.data(), spheres.size());
 #else
-    // , spheres.size() * sizeof(Sphere)
-    render_kernel<<<grid, block>>>(output_d, device_spheres, spheres.size());
+    render_kernel<<<grid, block>>>(output_d, width, height, samples, device_spheres, spheres.size());
 #endif
 
     cudaMemcpy(output_h, output_d, width * height * sizeof(float3), cudaMemcpyDeviceToHost);
 
+    /* Write to file */
+    if (opts.count("o") > 0) {
+        write_to_file(opts["o"].as<std::string>().c_str(), output_h);
+    }
+
+    /* Free memory */
     cudaFree(output_d);
     cudaFree(device_spheres);
-
-    write_to_file("smallptcuda.ppm", output_h);
 
     delete[] output_h;
 }
