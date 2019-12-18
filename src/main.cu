@@ -9,6 +9,7 @@
 
 #include "cutil_math.h"
 #include "cxxopts.hpp"
+#include "OpenImageDenoise/oidn.hpp"
 
 static uint32_t width = 512;
 static uint32_t height = 512;
@@ -308,6 +309,8 @@ std::vector<Sphere> spheres {
 
 int main(int argc, char** argv) {
     /* Parse options */
+    bool denoise = false;
+
     cxxopts::Options options(argv[0], "Path tracer for MI-PRC");
 
     options.add_options()
@@ -316,6 +319,7 @@ int main(int argc, char** argv) {
             ("s,samples", "Samples per pixel", cxxopts::value<uint32_t>()->default_value("1024"))
             ("r,random", "Random spheres", cxxopts::value<uint32_t>()->default_value("0"))
             ("o,output", "Output file", cxxopts::value<std::string>())
+            ("d,denoise", "Denoise output", cxxopts::value<bool>(denoise))
             ;
 
     auto opts = options.parse(argc, argv);
@@ -361,7 +365,31 @@ int main(int argc, char** argv) {
 
     /* Write to file */
     if (opts.count("o") > 0) {
-        write_to_file(opts["o"].as<std::string>().c_str(), output_h);
+        auto buffer = output_h;
+
+        if (denoise) {
+            printf("Denoising...\n");
+
+            float3* denoised = new float3[width*height];
+
+            oidn::DeviceRef device = oidn::newDevice();
+            device.commit();
+
+            oidn::FilterRef filter = device.newFilter("RT");
+            filter.setImage("color",  output_h,  oidn::Format::Float3, width, height);
+            filter.setImage("output", denoised, oidn::Format::Float3, width, height);
+            filter.commit();
+
+            filter.execute();
+
+            buffer = denoised;
+        }
+
+        write_to_file(opts["o"].as<std::string>().c_str(), buffer);
+
+        if (denoise) {
+            delete[] buffer;
+        }
     }
 
     /* Free memory */
